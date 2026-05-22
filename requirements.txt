@@ -1,0 +1,8 @@
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+httpx==0.28.1
+pydantic==2.11.4
+python-multipart==0.0.20
+rapidfuzz==3.13.0
+faster-whisper==1.1.1
+spacy==3.8.7
