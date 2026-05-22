@@ -316,7 +316,8 @@ function App() {
       )}
       {view === "pipeline" && (
         <Pipeline pipeline={pipeline} setPipeline={setPipeline}
-          selectedStations={selectedStations} keywords={keywords} activeProfiles={activeProfiles} />
+          selectedStations={selectedStations} keywords={keywords}
+          activeProfiles={activeProfiles} allProfiles={profiles} />
       )}
       {view === "alerts" && (
         <Alerts alerts={alerts} setAlerts={setAlerts} activeCodes={activeCodes}
@@ -819,9 +820,10 @@ function Keywords({ keywords, setKeywords, addKeywords, activeCodes, profiles }:
 }
 
 // ── Pipeline ──────────────────────────────────────────────────────────────────
-function Pipeline({ pipeline, setPipeline, selectedStations, keywords, activeProfiles }: {
+function Pipeline({ pipeline, setPipeline, selectedStations, keywords, activeProfiles, allProfiles }: {
   pipeline: PipelineConfig; setPipeline: (v: PipelineConfig) => void;
-  selectedStations: Station[]; keywords: KeywordConfig; activeProfiles: LanguageProfile[];
+  selectedStations: Station[]; keywords: KeywordConfig;
+  activeProfiles: LanguageProfile[]; allProfiles: LanguageProfile[];
 }) {
   const script = useMemo(() => generateScript(pipeline, selectedStations, keywords, activeProfiles),
     [pipeline, selectedStations, keywords, activeProfiles]);
@@ -853,7 +855,7 @@ function Pipeline({ pipeline, setPipeline, selectedStations, keywords, activePro
           <TextInput label="Transcript directory" value={pipeline.transcriptLogDirectory} onChange={(v) => update({ transcriptLogDirectory: v })} />
         </Panel>
         <Panel title="Language models">
-          <Coverage profiles={activeProfiles} showInstall={keywords.matchMode === "lemma"} />
+          <Coverage profiles={allProfiles} activeCodes={new Set(activeProfiles.map((p) => p.code))} showInstall />
         </Panel>
       </section>
       <details className="run-instructions band">
@@ -1027,18 +1029,23 @@ function InstallButton({ model }: { model: string }) {
   );
 }
 
-function Coverage({ profiles, showInstall }: { profiles: LanguageProfile[]; showInstall?: boolean }) {
-  if (!profiles.length) return <p style={{ color: "#9aa7b5", margin: 0 }}>No active languages.</p>;
+function Coverage({ profiles, activeCodes, showInstall }: {
+  profiles: LanguageProfile[]; activeCodes?: Set<string>; showInstall?: boolean;
+}) {
+  if (!profiles.length) return <p style={{ color: "#9aa7b5", margin: 0 }}>No languages available.</p>;
   return (
     <table className="coverage-table"><tbody>
-      {profiles.map((p) => (
-        <tr key={p.code}>
-          <td className="coverage-lang">{p.code.toUpperCase()}</td>
-          <td className="coverage-model">{p.spaCyModel || <em style={{ color: "#9aa7b5" }}>No model</em>}</td>
-          <td>{p.lemmaSupported ? <span className="badge ok">Lemma</span> : <span className="badge warn">Exact</span>}</td>
-          {showInstall && p.spaCyModel && <td><InstallButton model={p.spaCyModel} /></td>}
-        </tr>
-      ))}
+      {profiles.map((p) => {
+        const isActive = activeCodes ? activeCodes.has(p.code) : true;
+        return (
+          <tr key={p.code} className={isActive ? "" : "coverage-inactive"}>
+            <td className="coverage-lang">{p.code.toUpperCase()}</td>
+            <td className="coverage-model">{p.spaCyModel || <em style={{ color: "#9aa7b5" }}>No model</em>}</td>
+            <td>{p.lemmaSupported ? <span className="badge ok">Lemma</span> : <span className="badge warn">Exact</span>}</td>
+            {showInstall && <td>{p.spaCyModel ? <InstallButton model={p.spaCyModel} /> : null}</td>}
+          </tr>
+        );
+      })}
     </tbody></table>
   );
 }

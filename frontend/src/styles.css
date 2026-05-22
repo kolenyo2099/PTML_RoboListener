@@ -548,6 +548,7 @@ details[open] > summary::before { transform: rotate(90deg); }
 .coverage-lang { width: 36px; font-weight: 600; }
 .coverage-model { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 0; }
 .coverage-table td { padding: 4px 6px 4px 0; vertical-align: middle; }
+.coverage-inactive { opacity: 0.4; }
 
 .install-btn {
   font-size: 12px;
