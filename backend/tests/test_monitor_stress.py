@@ -32,6 +32,7 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 import tempfile
 import os
+import threading
 
 import pytest
 import pytest_asyncio
@@ -119,6 +120,7 @@ def _make_slot(svc, tmp_dir: Path, station_id: str = "test-station-1"):
     work_dir.mkdir(parents=True, exist_ok=True)
     slot = MonitorSlot(station=station, work_dir=work_dir)
     slot.ring_buffer = deque(maxlen=5)
+    slot.capture_chunk_seconds = max(1, svc.pipeline.chunkSeconds)
     return slot
 
 
@@ -389,3 +391,319 @@ async def test_broadcast_queue_not_unbounded(tmp_path):
     # drop old messages rather than growing forever.
     assert qsize <= 200, f"Queue grew to {qsize} — possible memory issue with many slow clients"
     svc.unsubscribe(slow_queue)
+
+
+@pytest.mark.asyncio
+async def test_post_buffer_waits_for_chunks_without_blocking_processing(tmp_path):
+    """A detection waits for configured future chunks while later chunks process."""
+    svc = _make_service(tmp_path)
+    svc.pipeline.postBufferSeconds = 10
+    slot = _make_slot(svc, tmp_path)
+    svc._transcribe = lambda chunk, lang: "breaking news"
+    svc.matcher.find_matches.side_effect = [(["news"], "exact", None), ([], "exact", None), ([], "exact", None)]
+    svc._ensure_directories()
+    written = []
+    svc._make_clip = lambda slot, keyword, chunks=None, **kwargs: written.append((keyword, len(chunks or []))) or "/tmp/test.wav"
+    records = []
+    svc._record_alert = lambda *args: records.append(args)
+    processed = set()
+
+    for i in range(3):
+        write_silent_wav(slot.work_dir / f"stream1_{i:06d}.wav")
+        await svc._process_ready_chunks(slot, processed, include_latest=True)
+        if i == 0:
+            assert not records and not written
+        if i == 1:
+            assert not records and not written
+
+    assert len(written) == 1
+    assert written[0] == ("news", 3)  # detection chunk + two post-buffer chunks
+    assert len(records) == 1
+
+
+def test_make_clip_encodes_selected_output_format(tmp_path):
+    svc = _make_service(tmp_path)
+    svc.pipeline.outputFormat = "mp3"
+    slot = _make_slot(svc, tmp_path)
+    chunk = slot.work_dir / "stream1_000000.wav"
+    write_silent_wav(chunk)
+    commands = []
+
+    class Result:
+        returncode = 0
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"encoded")
+        return Result()
+
+    with patch("app.monitor_service.subprocess.run", side_effect=fake_run):
+        output = svc._make_clip(slot, "news", [chunk])
+
+    assert output.endswith(".mp3")
+    assert "libmp3lame" in commands[0]
+    assert "128k" in commands[0]
+
+
+def test_ogg_encoding_falls_back_and_removes_failed_partial_output(tmp_path):
+    svc = _make_service(tmp_path)
+    svc.pipeline.outputFormat = "ogg"
+    slot = _make_slot(svc, tmp_path)
+    chunk = slot.work_dir / "stream1_000000.wav"
+    write_silent_wav(chunk)
+    commands = []
+
+    class Result:
+        def __init__(self, returncode):
+            self.returncode = returncode
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        output = Path(command[-1])
+        output.write_bytes(b"partial" if len(commands) < 3 else b"valid opus")
+        return Result(1 if len(commands) < 3 else 0)
+
+    with patch("app.monitor_service.subprocess.run", side_effect=fake_run):
+        output = svc._make_clip(slot, "news", [chunk])
+
+    assert output.endswith(".ogg")
+    assert "libvorbis" in commands[0]
+    assert "libopus" in commands[-1]
+    assert Path(output).read_bytes() == b"valid opus"
+    assert len(commands) == 3  # libvorbis, native vorbis, then libopus
+
+
+def test_failed_encoders_remove_partial_output_and_report_no_clip(tmp_path):
+    svc = _make_service(tmp_path)
+    svc.pipeline.outputFormat = "ogg"
+    slot = _make_slot(svc, tmp_path)
+    chunk = slot.work_dir / "stream1_000000.wav"
+    write_silent_wav(chunk)
+
+    class Result:
+        returncode = 1
+
+    def fake_run(command, **kwargs):
+        Path(command[-1]).write_bytes(b"truncated output")
+        return Result()
+
+    with patch("app.monitor_service.subprocess.run", side_effect=fake_run):
+        output = svc._make_clip(slot, "news", [chunk])
+
+    assert output == ""
+    assert not list((Path(svc.pipeline.outputDirectory) / datetime.now(timezone.utc).strftime("%Y%m%d")).glob("*.ogg"))
+
+
+def test_mp3_uses_libshine_when_lame_is_unavailable(tmp_path):
+    svc = _make_service(tmp_path)
+    svc.pipeline.outputFormat = "mp3"
+    slot = _make_slot(svc, tmp_path)
+    chunk = slot.work_dir / "stream1_000000.wav"
+    write_silent_wav(chunk)
+    commands = []
+
+    class Result:
+        def __init__(self, returncode):
+            self.returncode = returncode
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        Path(command[-1]).write_bytes(b"encoded")
+        return Result(1 if "libmp3lame" in command else 0)
+
+    with patch("app.monitor_service.subprocess.run", side_effect=fake_run):
+        output = svc._make_clip(slot, "news", [chunk])
+
+    assert output.endswith(".mp3")
+    assert "libshine" in commands[-1]
+    assert Path(output).read_bytes() == b"encoded"
+
+
+def test_cancel_pending_clip_records_detection_without_false_clip(tmp_path):
+    svc = _make_service(tmp_path)
+    slot = _make_slot(svc, tmp_path)
+    slot.pending_clips.append({
+        "keyword": "news", "transcript": "breaking news", "mode": "exact",
+        "model": None, "start_chunk": 1, "finish_chunk": 3, "pre_chunks": 1,
+    })
+    records = []
+    svc._record_alert = lambda *args: records.append(args)
+
+    svc._cancel_pending_clips(slot)
+
+    assert not slot.pending_clips
+    assert len(records) == 1
+    assert records[0][5:] == ("", 0)
+
+
+@pytest.mark.asyncio
+async def test_pending_detection_is_saved_without_clip_after_stream_exhaustion(tmp_path):
+    svc = _make_service(tmp_path)
+    slot = _make_slot(svc, tmp_path)
+    slot.pending_clips.append({
+        "keyword": "news", "transcript": "breaking news", "mode": "exact",
+        "model": None, "start_chunk": 1, "finish_chunk": 3, "pre_chunks": 1,
+        "chunk_seconds": 5, "output_format": "wav", "output_directory": str(tmp_path),
+    })
+    records = []
+    svc._record_alert = lambda *args: records.append(args)
+    svc._ensure_directories()
+    fake_proc = FakeProcess(alive_for=0)
+
+    with patch("shutil.which", return_value="/usr/bin/ffmpeg"):
+        with patch.object(svc, "_start_ffmpeg", lambda s, url, idx: setattr(s, "process", fake_proc)):
+            with patch.object(svc, "_stop_process_async", _async_noop_stop):
+                await svc._run_slot(slot)
+
+    assert slot.status == "error"
+    assert not slot.pending_clips
+    assert len(records) == 1
+    assert records[0][5:] == ("", 0)
+
+
+@pytest.mark.asyncio
+async def test_pending_clip_keeps_detection_time_settings_after_pipeline_patch(tmp_path):
+    svc = _make_service(tmp_path)
+    svc.pipeline.preBufferSeconds = 5
+    svc.pipeline.postBufferSeconds = 5
+    svc.pipeline.outputFormat = "mp3"
+    svc.pipeline.outputDirectory = str(tmp_path / "original")
+    slot = _make_slot(svc, tmp_path)
+    svc._ensure_directories()
+    svc._transcribe = lambda chunk, lang: "breaking news"
+    svc.matcher.find_matches.side_effect = [(["news"], "exact", None), ([], "exact", None)]
+    make_calls = []
+    svc._make_clip = lambda slot, keyword, chunks=None, **kwargs: make_calls.append((kwargs, threading.get_ident())) or "/tmp/frozen.mp3"
+    records = []
+    svc._record_alert = lambda *args: records.append(args)
+    processed = set()
+
+    write_silent_wav(slot.work_dir / "stream1_000000.wav")
+    await svc._process_ready_chunks(slot, processed, include_latest=True)
+    old_maxlen = slot.ring_buffer.maxlen
+    from app.models import PipelineConfig
+    svc.patch_pipeline(PipelineConfig(
+        outputDirectory=str(tmp_path / "changed"), outputFormat="ogg",
+        chunkSeconds=20, preBufferSeconds=0, postBufferSeconds=0,
+    ))
+    assert slot.ring_buffer.maxlen >= old_maxlen
+    write_silent_wav(slot.work_dir / "stream1_000001.wav")
+    await svc._process_ready_chunks(slot, processed, include_latest=True)
+
+    assert make_calls[0][0] == {"output_format": "mp3", "output_directory": str(tmp_path / "original")}
+    assert make_calls[0][1] != threading.get_ident()  # encoding work runs outside the event loop thread
+    assert len(records) == 1
+    assert records[0][5] == "/tmp/frozen.mp3"
+    assert records[0][6] == 1.0  # two real 0.5 second WAV chunks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["pause", "remove"])
+async def test_pause_or_remove_during_clip_encoding_records_once_and_deletes_output(tmp_path, action):
+    svc = _make_service(tmp_path)
+    slot = _make_slot(svc, tmp_path)
+    svc.slots[slot.station.id] = slot
+    chunk = slot.work_dir / "stream1_000000.wav"
+    write_silent_wav(chunk)
+    slot.ring_buffer.append(chunk)
+    slot.chunk_index = 1
+    slot.pending_clips.extend({
+        "id": f"race-test-{i}", "keyword": f"news-{i}", "transcript": "breaking news",
+        "mode": "exact", "model": None, "start_chunk": 1, "finish_chunk": 1,
+        "pre_chunks": 0, "chunk_seconds": 5, "output_format": "wav",
+        "output_directory": str(tmp_path),
+    } for i in range(2))
+    entered = threading.Event()
+    release = threading.Event()
+    output = tmp_path / "race.wav"
+
+    def slow_encode(*args, **kwargs):
+        entered.set()
+        assert release.wait(3)
+        output.write_bytes(b"encoded")
+        return str(output)
+
+    svc._make_clip = slow_encode
+    encoded_keywords = []
+    original_make_clip = svc._make_clip
+    def record_encode(slot_arg, keyword, *args, **kwargs):
+        encoded_keywords.append(keyword)
+        return original_make_clip(slot_arg, keyword, *args, **kwargs)
+    svc._make_clip = record_encode
+    records = []
+    svc._record_alert = lambda *args: records.append(args)
+    task = asyncio.create_task(svc._complete_pending_clips(slot))
+    slot.task = task
+    assert await asyncio.to_thread(entered.wait, 2)
+
+    if action == "pause":
+        svc.pause(slot.station.id)
+    else:
+        svc.remove(slot.station.id)
+    release.set()
+    if action == "remove":
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        await task
+
+    assert len(records) == 2
+    assert all(record[5:] == ("", 0) for record in records)
+    assert len(encoded_keywords) == 1
+    assert not output.exists()
+    assert not slot.pending_clips and not slot.in_flight_clips
+
+
+@pytest.mark.asyncio
+async def test_pending_window_uses_active_ffmpeg_chunk_duration_after_settings_change(tmp_path):
+    svc = _make_service(tmp_path)
+    slot = _make_slot(svc, tmp_path)
+    slot.capture_chunk_seconds = 5  # ffmpeg was started with the old setting
+    from app.models import PipelineConfig
+    svc.patch_pipeline(PipelineConfig(
+        chunkSeconds=20, preBufferSeconds=0, postBufferSeconds=11,
+        outputDirectory=str(tmp_path), outputFormat="wav",
+    ))
+    svc._transcribe = lambda chunk, lang: "breaking news"
+    svc.matcher.find_matches.return_value = (["news"], "exact", None)
+    svc._ensure_directories()
+    processed = set()
+    write_silent_wav(slot.work_dir / "stream1_000000.wav")
+    await svc._process_ready_chunks(slot, processed, include_latest=True)
+
+    pending = slot.pending_clips[0]
+    assert pending["chunk_seconds"] == 5
+    assert pending["finish_chunk"] - pending["start_chunk"] == 3
+    assert slot.ring_buffer.maxlen >= 4
+
+
+@pytest.mark.asyncio
+async def test_pause_during_transcription_does_not_enqueue_new_detection(tmp_path):
+    svc = _make_service(tmp_path)
+    slot = _make_slot(svc, tmp_path)
+    svc.slots[slot.station.id] = slot
+    chunk = slot.work_dir / "stream1_000000.wav"
+    write_silent_wav(chunk)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_transcribe(*args):
+        entered.set()
+        assert release.wait(3)
+        return "breaking news"
+
+    svc._transcribe = slow_transcribe
+    svc.matcher.find_matches.return_value = (["news"], "exact", None)
+    records = []
+    svc._record_alert = lambda *args: records.append(args)
+    task = asyncio.create_task(svc._process_ready_chunks(slot, set(), include_latest=True))
+    assert await asyncio.to_thread(entered.wait, 2)
+
+    svc.pause(slot.station.id)
+    release.set()
+    await task
+
+    assert slot.paused
+    assert not slot.pending_clips and not slot.in_flight_clips
+    assert not records
+    svc.matcher.find_matches.assert_not_called()

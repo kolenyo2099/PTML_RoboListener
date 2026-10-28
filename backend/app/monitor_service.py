@@ -8,10 +8,10 @@ so one broken stream does not stop the other monitor slots.
 from __future__ import annotations
 
 import asyncio
-import json
 import shutil
 import subprocess
 import uuid
+import wave
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -41,6 +41,9 @@ class MonitorSlot:
     alert_count: int = 0
     chunk_index: int = 0
     paused: bool = False
+    pending_clips: list[dict] = field(default_factory=list)
+    in_flight_clips: dict[str, dict] = field(default_factory=dict)
+    capture_chunk_seconds: int = 30
 
 
 class MonitorService:
@@ -65,7 +68,7 @@ class MonitorService:
             if station.id in self.slots:
                 continue
             slot = MonitorSlot(station=station, work_dir=self._station_work_dir(station))
-            slot.ring_buffer = deque(maxlen=max(1, self.pipeline.preBufferSeconds // self.pipeline.chunkSeconds + 2))
+            slot.ring_buffer = deque(maxlen=self._clip_buffer_chunks())
             self.slots[station.id] = slot
             slot.task = asyncio.create_task(self._run_slot(slot))
         asyncio.create_task(self._broadcast(self.snapshot()))
@@ -73,6 +76,7 @@ class MonitorService:
     def remove(self, station_id: int) -> None:
         slot = self.slots.pop(station_id, None)
         if slot:
+            self._cancel_pending_clips(slot)
             self._stop_process(slot)
             if slot.task:
                 slot.task.cancel()
@@ -80,6 +84,7 @@ class MonitorService:
     def pause(self, station_id: int) -> None:
         slot = self.slots.get(station_id)
         if slot:
+            self._cancel_pending_clips(slot)
             slot.paused = True
             slot.status = "paused"
             self._stop_process(slot)
@@ -99,6 +104,19 @@ class MonitorService:
 
     def patch_pipeline(self, pipeline: PipelineConfig) -> None:
         self.pipeline = pipeline
+        # Never shrink a live slot's buffer: a pending clip may rely on its
+        # original window while settings are being edited.
+        for slot in self.slots.values():
+            slot.ring_buffer = deque(
+                slot.ring_buffer,
+                maxlen=max(slot.ring_buffer.maxlen or 0, self._clip_buffer_chunks(slot.capture_chunk_seconds)),
+            )
+
+    def _clip_buffer_chunks(self, capture_chunk_seconds: int | None = None) -> int:
+        chunk_seconds = max(1, capture_chunk_seconds or self.pipeline.chunkSeconds)
+        pre = max(0, self.pipeline.preBufferSeconds)
+        post = max(0, self.pipeline.postBufferSeconds)
+        return max(1, (pre + chunk_seconds - 1) // chunk_seconds + (post + chunk_seconds - 1) // chunk_seconds + 1)
 
     def snapshot(self) -> dict:
         alerts = list_alerts()
@@ -135,6 +153,7 @@ class MonitorService:
         if shutil.which("ffmpeg") is None:
             slot.status = "error"
             slot.error_message = "ffmpeg is not installed or not on PATH."
+            self._cancel_pending_clips(slot)
             await self._broadcast(self.snapshot())
             return
 
@@ -144,6 +163,7 @@ class MonitorService:
         if not streams:
             slot.status = "error"
             slot.error_message = "Station has no stream URL."
+            self._cancel_pending_clips(slot)
             await self._broadcast(self.snapshot())
             return
 
@@ -164,6 +184,7 @@ class MonitorService:
             if not slot.error_message and not slot.paused:
                 slot.error_message = f"Stream ended on fallback {stream_index}."
         if not slot.paused:
+            self._cancel_pending_clips(slot)
             slot.status = "error"
             slot.error_message = slot.error_message or "All stream fallbacks failed."
             await self._broadcast(self.snapshot())
@@ -199,6 +220,9 @@ class MonitorService:
         return url
 
     def _start_ffmpeg(self, slot: MonitorSlot, url: str, stream_index: int) -> None:
+        # This remains the true segment size for the lifetime of this process,
+        # even if the user edits pipeline settings while capture is active.
+        slot.capture_chunk_seconds = max(1, self.pipeline.chunkSeconds)
         resolved = self._resolve_url(url)
         pattern = slot.work_dir / f"stream{stream_index}_%06d.wav"
         is_http = resolved.lower().startswith(("http://", "https://"))
@@ -243,6 +267,7 @@ class MonitorService:
                 processed.discard(evicted)
 
             slot.chunk_index += 1
+            await self._complete_pending_clips(slot)
             slot.status = "transcribing"
             await self._broadcast(self.snapshot())
             try:
@@ -256,6 +281,12 @@ class MonitorService:
                 slot.error_message = f"Transcription error on chunk {slot.chunk_index}: {exc}"
                 await self._broadcast(self.snapshot())
                 continue
+            if slot.paused:
+                # Pause may have arrived while transcription was running. The
+                # user has already cancelled pending work, so don't enqueue a
+                # fresh detection from this late result.
+                slot.status = "paused"
+                continue
             slot.error_message = ""
             slot.last_transcript = transcript
             slot.last_transcript_at = datetime.now(timezone.utc)
@@ -266,8 +297,20 @@ class MonitorService:
             if matches:
                 slot.status = "match"
                 for keyword in matches:
-                    clip_path = self._make_clip(slot, keyword)
-                    self._record_alert(slot, keyword, transcript, mode_used, model_used, clip_path)
+                    capture_seconds = max(1, slot.capture_chunk_seconds)
+                    post_chunks = (max(0, self.pipeline.postBufferSeconds) + capture_seconds - 1) // capture_seconds
+                    slot.pending_clips.append({
+                        "id": uuid.uuid4().hex,
+                        "keyword": keyword, "transcript": transcript,
+                        "mode": mode_used, "model": model_used,
+                        "start_chunk": slot.chunk_index,
+                        "finish_chunk": slot.chunk_index + post_chunks,
+                        "pre_chunks": (max(0, self.pipeline.preBufferSeconds) + capture_seconds - 1) // capture_seconds,
+                        "chunk_seconds": capture_seconds,
+                        "output_format": self.pipeline.outputFormat,
+                        "output_directory": self.pipeline.outputDirectory,
+                    })
+                await self._complete_pending_clips(slot)
             else:
                 slot.status = "capturing"
             await self._broadcast(self.snapshot())
@@ -292,23 +335,120 @@ class MonitorService:
         segments, _info = self._model.transcribe(str(chunk), language=language)
         return " ".join(segment.text.strip() for segment in segments).strip()
 
-    def _make_clip(self, slot: MonitorSlot, keyword: str) -> str:
+    def _make_clip(self, slot: MonitorSlot, keyword: str, chunks: list[Path] | None = None, *, output_format: str | None = None, output_directory: str | None = None) -> str:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        day_dir = Path(self.pipeline.outputDirectory) / stamp[:8]
+        day_dir = Path(output_directory or self.pipeline.outputDirectory) / stamp[:8]
         day_dir.mkdir(parents=True, exist_ok=True)
         safe_keyword = "".join(ch for ch in keyword.lower() if ch.isalnum() or ch in ("-", "_"))[:24] or "match"
-        output = day_dir / f"{slot.station.slug or slot.station.id}_{slot.station.languageCode}_{stamp}_{safe_keyword}.wav"
-        chunks = [path for path in slot.ring_buffer if path.exists()]
+        fmt = output_format or self.pipeline.outputFormat
+        fmt = fmt if fmt in {"wav", "mp3", "ogg"} else "wav"
+        output = day_dir / f"{slot.station.slug or slot.station.id}_{slot.station.languageCode}_{stamp}_{safe_keyword}_{uuid.uuid4().hex[:10]}.{fmt}"
+        chunks = [path for path in (chunks if chunks is not None else list(slot.ring_buffer)) if path.exists()]
         if not chunks:
             return ""
         list_file = slot.work_dir / f"concat_{uuid.uuid4().hex}.txt"
         list_file.write_text("".join(f"file '{path.resolve()}'\n" for path in chunks), encoding="utf-8")
-        command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", str(output.resolve())]
-        result = subprocess.run(command, capture_output=True, text=True)
-        list_file.unlink(missing_ok=True)
-        return str(output) if result.returncode == 0 else ""
+        command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file)]
+        if fmt == "wav":
+            encoder_options = [["-c:a", "pcm_s16le"]]
+        elif fmt == "mp3":
+            # libshine is commonly built into smaller FFmpeg distributions
+            # that omit the higher quality libmp3lame encoder.
+            encoder_options = [
+                ["-c:a", "libmp3lame", "-b:a", "128k"],
+                ["-c:a", "libshine", "-b:a", "128k"],
+            ]
+        else:
+            # Ogg can carry Vorbis or Opus. Try the common Vorbis encoders,
+            # then Opus for builds with neither Vorbis implementation.
+            encoder_options = [
+                ["-c:a", "libvorbis", "-q:a", "4"],
+                ["-c:a", "vorbis", "-strict", "experimental", "-q:a", "4"],
+                ["-c:a", "libopus", "-b:a", "96k"],
+            ]
+        output_arg = str(output.resolve())
+        try:
+            for options in encoder_options:
+                output.unlink(missing_ok=True)
+                result = subprocess.run(command + options + [output_arg], capture_output=True, text=True)
+                if result.returncode == 0 and output.is_file() and output.stat().st_size > 0:
+                    return str(output)
+            output.unlink(missing_ok=True)
+            return ""
+        except Exception:
+            output.unlink(missing_ok=True)
+            raise
+        finally:
+            list_file.unlink(missing_ok=True)
 
-    def _record_alert(self, slot: MonitorSlot, keyword: str, transcript: str, mode_used: str, model_used: str | None, clip_path: str) -> None:
+    async def _complete_pending_clips(self, slot: MonitorSlot) -> None:
+        ready = [item for item in slot.pending_clips if slot.chunk_index >= item["finish_chunk"]]
+        waiting = [item for item in slot.pending_clips if slot.chunk_index < item["finish_chunk"]]
+        # Keep ready-but-not-yet-encoding items cancellable while another clip
+        # is in flight; otherwise a stop could drop the rest of this batch.
+        slot.pending_clips = ready + waiting
+        for pending in ready:
+            if pending not in slot.pending_clips:
+                # A pause/remove may have cancelled this item while an earlier
+                # clip in this same ready batch was being encoded.
+                continue
+            slot.pending_clips = [item for item in slot.pending_clips if item["id"] != pending["id"]]
+            chunks = list(slot.ring_buffer)[-(pending["pre_chunks"] + (pending["finish_chunk"] - pending["start_chunk"]) + 1):]
+            clip_id = pending["id"]
+            slot.in_flight_clips[clip_id] = pending
+            worker = asyncio.create_task(asyncio.to_thread(
+                self._make_clip, slot, pending["keyword"], chunks,
+                output_format=pending["output_format"], output_directory=pending["output_directory"],
+            ))
+            try:
+                clip_path = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                # Cancellation must wait for the worker's result so a clip
+                # created concurrently with pause/remove can be cleaned up.
+                try:
+                    clip_path = await asyncio.shield(worker)
+                except Exception:
+                    clip_path = ""
+                self._discard_if_present(clip_path)
+                if slot.in_flight_clips.pop(clip_id, None) is not None:
+                    self._record_alert(slot, pending["keyword"], pending["transcript"], pending["mode"], pending["model"], "", 0)
+                raise
+            except Exception:
+                # Preserve the detection even if ffmpeg invocation or filesystem
+                # access fails; an empty clip path is explicit in the alert.
+                clip_path = ""
+            if slot.in_flight_clips.pop(clip_id, None) is None:
+                # pause/remove already persisted this detection without a clip
+                self._discard_if_present(clip_path)
+                continue
+            duration = round(sum(self._chunk_duration(path, pending["chunk_seconds"]) for path in chunks), 2)
+            self._record_alert(slot, pending["keyword"], pending["transcript"], pending["mode"], pending["model"], clip_path, duration)
+
+    @staticmethod
+    def _discard_if_present(clip_path: str) -> None:
+        if clip_path:
+            Path(clip_path).unlink(missing_ok=True)
+
+    @staticmethod
+    def _chunk_duration(path: Path, nominal_seconds: int) -> float:
+        # Captured chunks are WAV; read their headers so a short final segment
+        # is reflected accurately without launching an ffprobe process.
+        try:
+            with wave.open(str(path), "rb") as audio:
+                rate = audio.getframerate()
+                return audio.getnframes() / rate if rate else float(nominal_seconds)
+        except (OSError, wave.Error):
+            return float(nominal_seconds)
+
+    def _cancel_pending_clips(self, slot: MonitorSlot) -> None:
+        """Persist detections on stop/pause without claiming an incomplete clip exists."""
+        pending = slot.pending_clips + list(slot.in_flight_clips.values())
+        slot.pending_clips = []
+        slot.in_flight_clips.clear()
+        for item in pending:
+            self._record_alert(slot, item["keyword"], item["transcript"], item["mode"], item["model"], "", 0)
+
+    def _record_alert(self, slot: MonitorSlot, keyword: str, transcript: str, mode_used: str, model_used: str | None, clip_path: str, duration: int | None = None) -> None:
         slot.alert_count += 1
         self.total_matches += 1
         self.total_clips += 1 if clip_path else 0
@@ -323,7 +463,7 @@ class MonitorService:
             "transcriptSnippet": transcript,
             "fullTranscriptPath": self._append_transcript(slot, transcript),
             "clipPath": clip_path,
-            "clipDurationSeconds": len(slot.ring_buffer) * self.pipeline.chunkSeconds,
+            "clipDurationSeconds": duration if clip_path else 0,
             "detectedAt": datetime.now(timezone.utc).isoformat(),
             "reviewed": False,
             "chunkIndex": slot.chunk_index,

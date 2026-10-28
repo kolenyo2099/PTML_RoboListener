@@ -54,7 +54,7 @@ class KeywordConfig(BaseModel):
 
 
 class PipelineConfig(BaseModel):
-    whisperModel: str = "turbo"
+    whisperModel: str = "small"
     device: str = "auto"
     computeType: str = "auto"
     languageHintMode: str = "per-station"

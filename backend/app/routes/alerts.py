@@ -25,10 +25,10 @@ async def export_alerts(ids: str = Query("")) -> StreamingResponse:
         archive.writestr("metadata.json", json.dumps(rows, indent=2, ensure_ascii=False))
         for alert in rows:
             clip = Path(alert.get("clipPath") or "")
-            if clip.exists():
+            if clip.is_file():
                 archive.write(clip, f"clips/{clip.name}")
     buffer.seek(0)
-    return StreamingResponse(buffer, media_type="application/zip", headers={"Content-Disposition": "attachment; filename=radiowatch_alerts.zip"})
+    return StreamingResponse(buffer, media_type="application/zip", headers={"Content-Disposition": "attachment; filename=robolistener_alerts.zip"})
 
 
 @router.get("/{alert_id}")
@@ -44,7 +44,9 @@ async def clip(alert_id: str) -> FileResponse:
     alert = next((row for row in list_alerts() if row["id"] == alert_id), None)
     if not alert or not alert.get("clipPath") or not Path(alert["clipPath"]).exists():
         raise HTTPException(status_code=404, detail="Clip file not found")
-    return FileResponse(alert["clipPath"], media_type="audio/wav")
+    path = Path(alert["clipPath"])
+    media_type = {".wav": "audio/wav", ".mp3": "audio/mpeg", ".ogg": "audio/ogg"}.get(path.suffix.lower(), "application/octet-stream")
+    return FileResponse(path, media_type=media_type, filename=path.name, content_disposition_type="inline")
 
 
 @router.patch("/{alert_id}")

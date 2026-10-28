@@ -1,5 +1,5 @@
 /**
- * RadioWatch — frontend entry point.
+ * RoboListener — frontend entry point.
  * Powered by Radio Browser (https://api.radio-browser.info/), free & key-free.
  */
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -13,9 +13,11 @@ import type {
   Alert, BackendStatus, KeywordConfig, Language,
   LanguageProfile, PipelineConfig, Station,
 } from "./lib/types";
+import "@fontsource-variable/red-hat-display";
+import "@fontsource-variable/red-hat-text";
 import "./styles.css";
 
-type View = "discovery" | "monitor" | "keywords" | "pipeline" | "alerts";
+type View = "discovery" | "monitor" | "keywords" | "pipeline" | "alerts" | "about";
 type Toast = { id: string; message: string; cls?: string };
 
 // ── Session bootstrap ─────────────────────────────────────────────────────────
@@ -35,7 +37,11 @@ function App() {
   const [selectedIds, setSelectedIds] = useState<string[]>(saved.selectedIds || []);
   const [stationsLoadedAt, setStationsLoadedAt] = useState<number | null>(saved.stationsLoadedAt || null);
   const [keywords, setKeywords] = useState<KeywordConfig>(saved.keywords || defaultKeywords);
-  const [pipeline, setPipeline] = useState<PipelineConfig>(saved.pipeline || defaultPipeline);
+  const [pipeline, setPipeline] = useState<PipelineConfig>(() => {
+    const config = saved.pipeline || defaultPipeline;
+    // Earlier versions offered MPS, which CTranslate2 does not support.
+    return config.device === "mps" ? { ...config, device: "cpu", computeType: "auto" } : config;
+  });
   const [status, setStatus] = useState<BackendStatus | null>(null);
   const [wsConnected, setWsConnected] = useState(false);
   const [alerts, setAlerts] = useState<Alert[]>([]);
@@ -233,10 +239,10 @@ function App() {
     <div>
       {/* ── Top bar ──────────────────────────────────────────────────────────── */}
       <header className="topbar">
-        <div className="brand"><Radio size={22} /> RadioWatch</div>
-        <nav>
-          {(["discovery", "monitor", "keywords", "pipeline", "alerts"] as View[]).map((v) => (
-            <button key={v} className={view === v ? "active" : ""} onClick={() => setView(v)}>{v.charAt(0).toUpperCase() + v.slice(1)}</button>
+        <div className="brand"><Radio size={22} aria-hidden="true" /><span><strong>RoboListener</strong><small>Public Tech Media Lab</small></span></div>
+        <nav aria-label="Main navigation">
+          {(["discovery", "monitor", "keywords", "pipeline", "alerts", "about"] as View[]).map((v) => (
+            <button key={v} className={view === v ? "active" : ""} aria-current={view === v ? "page" : undefined} onClick={() => setView(v)}>{v.charAt(0).toUpperCase() + v.slice(1)}</button>
           ))}
         </nav>
       </header>
@@ -330,6 +336,8 @@ function App() {
           deleteConfirmId={deleteConfirmId} setDeleteConfirmId={setDeleteConfirmId} />
       )}
 
+      {view === "about" && <About />}
+
       {/* ── Delete confirm modal ─────────────────────────────────────────────── */}
       {deleteConfirmId && (
         <DeleteConfirmModal
@@ -342,6 +350,43 @@ function App() {
         />
       )}
     </div>
+  );
+}
+
+// ── About ─────────────────────────────────────────────────────────────────────
+function About() {
+  return (
+    <main className="about-page">
+      <section className="about-intro">
+        <div className="about-mark" aria-hidden="true"><Radio size={30} /></div>
+        <div>
+          <h1>About RoboListener</h1>
+          <p className="about-lead">Listen for the words that matter across radio streams.</p>
+          <p>RoboListener records audio from selected streams. It transcribes the audio on your computer and looks for your keywords. When it finds a match, it creates an alert and attempts to save an audio clip.</p>
+        </div>
+      </section>
+      <div className="about-content">
+        <section>
+          <h2>How to start</h2>
+          <ol>
+            <li>In <strong>Discovery</strong>, choose a language. Load stations or add a stream URL.</li>
+            <li>Select a station. In <strong>Keywords</strong>, add the words you want to find.</li>
+            <li>In <strong>Monitor</strong>, select <strong>Start monitoring</strong>. Review matches in <strong>Alerts</strong>.</li>
+          </ol>
+          <p>For installation steps and more help, open <strong>README.md</strong> in the RoboListener folder.</p>
+        </section>
+        <section>
+          <h2>Check the source audio</h2>
+          <p>Transcripts can contain errors or miss words. Listen to the recording before you use a match as evidence. Audio quality, language and model size can affect the result.</p>
+          <p>Transcription runs on your computer. Station search uses the Radio Browser service. Streaming, model downloads and optional language model downloads use the internet.</p>
+        </section>
+        <section>
+          <h2>Public Tech Media Lab</h2>
+          <p>The Public Tech Media Lab at the University of Wisconsin–Madison brings journalism and public-interest technology together. The lab supports tools for digital investigations.</p>
+          <a href="https://ptml.sjmc.wisc.edu/" target="_blank" rel="noopener noreferrer">Visit the Public Tech Media Lab <span aria-hidden="true">↗</span></a>
+        </section>
+      </div>
+    </main>
   );
 }
 
@@ -824,8 +869,7 @@ function Monitor({ selectedStations, status, wsConnected, startMonitoring, setSe
         {!wsConnected && (
           <div style={{ background: "#f5f7f9", borderRadius: 8, padding: 16, marginBottom: 14 }}>
             <p style={{ margin: "0 0 8px", fontWeight: 600 }}>Backend not connected</p>
-            <p style={{ margin: "0 0 10px", color: "#526074", fontSize: 14 }}>Start the backend with:</p>
-            <pre style={{ margin: 0 }}>uvicorn app.main:app --reload --port 8000</pre>
+            <p style={{ margin: "0 0 10px", color: "#526074", fontSize: 14 }}>Open RoboListener again using the launcher in its folder.</p>
             <p style={{ margin: "8px 0 0", color: "#526074", fontSize: 13 }}>Retrying automatically every 5 s…</p>
           </div>
         )}
@@ -1046,9 +1090,13 @@ function Pipeline({ pipeline, setPipeline, selectedStations, keywords, activePro
     <main>
       <section className="settings-grid">
         <Panel title="Transcription">
-          <Select label="Whisper model" value={pipeline.whisperModel} values={["large-v3", "turbo", "medium", "small", "tiny"]} onChange={(v) => update({ whisperModel: v as PipelineConfig["whisperModel"] })} />
-          <Select label="Device" value={pipeline.device} values={["auto", "cpu", "cuda", "mps"]} onChange={(v) => update({ device: v as PipelineConfig["device"] })} />
+          <p className="transcription-intro">Transcription runs on your computer using Faster Whisper. Start with one station and check whether transcripts keep up with the audio.</p>
+          <button type="button" className="low-power-button" onClick={() => update({ whisperModel: "small", device: "cpu", computeType: "int8" })}>Use settings for a slower computer</button>
+          <p className="settings-hint">Small + CPU + int8 uses less memory than larger models. If it still falls behind, try tiny; if accuracy matters more and your computer keeps up, try turbo or large-v3. Results vary by language and audio quality.</p>
+          <Select label="Whisper model" value={pipeline.whisperModel} values={["large-v3", "turbo", "medium", "small", "base", "tiny"]} onChange={(v) => update({ whisperModel: v as PipelineConfig["whisperModel"] })} />
+          <Select label="Device" value={pipeline.device} values={["auto", "cpu", "cuda"]} onChange={(v) => update({ device: v as PipelineConfig["device"] })} />
           <Select label="Compute type" value={pipeline.computeType} values={["auto", "float16", "int8"]} onChange={(v) => update({ computeType: v as PipelineConfig["computeType"] })} />
+          <p className="settings-hint">Auto uses the CPU; CUDA requires a compatible NVIDIA GPU and CUDA libraries. Apple GPU acceleration is not supported by this backend. The first use of a model downloads it; an internet connection and disk space are needed.</p>
           <Select label="Language hint" value={pipeline.languageHintMode} values={["per-station", "auto-detect", "manual"]} onChange={(v) => update({ languageHintMode: v as PipelineConfig["languageHintMode"] })} />
           {pipeline.languageHintMode === "manual" && (
             <TextInput label="Language code (e.g. es)" value={pipeline.manualLanguageCode} onChange={(v) => update({ manualLanguageCode: v })} />
@@ -1078,7 +1126,7 @@ function Pipeline({ pipeline, setPipeline, selectedStations, keywords, activePro
                     : <span className="badge warn">Not found</span>}
                 </td>
                 <td style={{ padding: "4px 0", fontSize: 12, color: "#627084" }}>
-                  {ffmpegAvailable ? "All stream capture works." : "Required for all stream capture. Install via brew install ffmpeg or your package manager."}
+                  {ffmpegAvailable ? "Required for stream capture." : "Required for all stream capture. Install via brew install ffmpeg or your package manager."}
                 </td>
               </tr>
               <tr>
@@ -1090,7 +1138,7 @@ function Pipeline({ pipeline, setPipeline, selectedStations, keywords, activePro
                 </td>
                 <td style={{ padding: "4px 0", fontSize: 12, color: "#627084" }}>
                   {ytDlpAvailable
-                    ? "YouTube, Twitch, and similar platform streams are supported."
+                    ? "Can resolve supported platform streams; availability varies."
                     : "Optional. Enables YouTube, Twitch, and other platform streams. Install with: pip install yt-dlp"}
                 </td>
               </tr>
@@ -1111,7 +1159,7 @@ function Pipeline({ pipeline, setPipeline, selectedStations, keywords, activePro
         <h1>Generated Python script</h1>
         <div className="actions">
           <button onClick={() => navigator.clipboard.writeText(script)}>Copy</button>
-          <button onClick={() => download("radiowatch_monitor.py", script)}><Download size={16} /> Download</button>
+          <button onClick={() => download("robolistener_monitor.py", script)}><Download size={16} /> Download</button>
         </div>
         <pre>{script}</pre>
       </section>
@@ -1210,7 +1258,7 @@ function Alerts({ alerts, setAlerts, activeCodes, deleteConfirmId, setDeleteConf
             {alert.clipExists && <audio controls src={api.clipUrl(alert.id)} style={{ width: "100%", marginTop: 6 }} />}
             <div className="actions" style={{ marginTop: 8 }}>
               {alert.clipExists && (
-                <a href={api.clipUrl(alert.id)} download={`${alert.stationName}_${alert.matchedKeyword}.wav`}>
+                <a href={api.clipUrl(alert.id)} download={`${alert.stationName}_${alert.matchedKeyword}.${alert.clipPath.split(".").pop() || "wav"}`}>
                   <button style={{ fontSize: 13 }}><Download size={14} /> Clip</button>
                 </a>
               )}
@@ -1366,7 +1414,7 @@ pip install faster-whisper rapidfuzz spacy
 ${spaCyLines || "# (no lemma-capable languages selected)"}
 
 # Run the exported script
-python radiowatch_monitor.py`;
+python robolistener_monitor.py`;
 }
 
 // ── Standalone script generator ───────────────────────────────────────────────
@@ -1383,7 +1431,7 @@ function generateScript(pipeline: PipelineConfig, stations: Station[], keywords:
   };
 
   return `#!/usr/bin/env python3
-"""Standalone RadioWatch monitor — exported from the browser UI.
+"""Standalone RoboListener monitor — exported from the browser UI.
 
 Captures streams with ffmpeg, transcribes with faster-whisper,
 matches keywords (exact / lemma / fuzzy), and writes alerts to a JSONL file.

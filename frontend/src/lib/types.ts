@@ -38,8 +38,8 @@ export type KeywordConfig = {
 };
 
 export type PipelineConfig = {
-  whisperModel: "large-v3" | "turbo" | "medium" | "small" | "tiny";
-  device: "auto" | "cpu" | "cuda" | "mps";
+  whisperModel: "large-v3" | "turbo" | "medium" | "small" | "base" | "tiny";
+  device: "auto" | "cpu" | "cuda";
   computeType: "auto" | "float16" | "int8";
   languageHintMode: "per-station" | "auto-detect" | "manual";
   manualLanguageCode: string;

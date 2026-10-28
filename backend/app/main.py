@@ -1,4 +1,4 @@
-"""FastAPI entrypoint for RadioWatch."""
+"""FastAPI entrypoint for RoboListener."""
 
 from contextlib import asynccontextmanager
 
@@ -15,7 +15,7 @@ async def lifespan(_: FastAPI):
     yield
 
 
-app = FastAPI(title="RadioWatch API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="RoboListener API", version="0.1.0", lifespan=lifespan)
 
 # The frontend runs on a Vite development port. CORS is limited to local origins
 # because this backend is intended for single-user localhost operation.
@@ -36,5 +36,5 @@ app.include_router(ws.router)
 
 @app.get("/")
 async def root() -> dict:
-    return {"name": "RadioWatch API", "status": "ready"}
+    return {"name": "RoboListener API", "status": "ready"}
 

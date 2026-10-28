@@ -42,7 +42,7 @@ export const defaultKeywords: KeywordConfig = {
 };
 
 export const defaultPipeline: PipelineConfig = {
-  whisperModel: "turbo",
+  whisperModel: "small",
   device: "auto",
   computeType: "auto",
   languageHintMode: "per-station",
