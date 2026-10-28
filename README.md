@@ -4,44 +4,108 @@ RoboListener monitors public radio streams for words in live speech. It runs a l
 
 The app has six views: Discovery, Monitor, Keywords, Pipeline, Alerts, and About. It uses the Radio Browser service to find stations. This service does not require an API key. The app needs an internet connection to find stations, install dependencies, download a Whisper model on first use, and access the station streams.
 
-## Requirements
+## Get RoboListener
 
-- Python 3.10 or newer
-- Node.js LTS, including npm
-- FFmpeg available on your `PATH` (required for audio capture)
-- Internet access during setup and when the app accesses online services
-- Optional: `yt-dlp` for supported YouTube, Twitch, and similar platform URLs
+1. Open the [RoboListener GitHub page](https://github.com/kolenyo2099/PTML_RoboListener).
+2. Select **Code**, then **Download ZIP**.
+3. Open your Downloads folder. Extract the ZIP file. Keep the extracted RoboListener folder in a place you can find again.
+4. Follow the steps below for your computer.
 
-The first use of each Whisper model downloads that model. The download needs disk space. The app's **Pipeline** view shows whether it can find FFmpeg and yt-dlp.
+You need an internet connection for setup, station searches, and live streams. The first use of a transcription model also downloads the model. Allow enough free disk space for the model and recordings.
 
 ## Install and start
 
-Use the steps for your operating system. Keep the project folder in place. Setup creates `.venv` and `frontend/node_modules` in this folder.
+RoboListener needs Python, Node.js, and FFmpeg. You install these tools once. The launcher then installs RoboListener's own dependencies the first time you start it. This can take several minutes. Keep the launcher window open until you finish using the app.
+
+For this version, use a standard 64-bit Python 3.10 to 3.13 installation. The app has been tested with Python 3.11 and 3.13. Do not use Python 3.14 or newer for this version: its required packages may not install. You can check your version with the commands below. Python 3.13.17 is the last python.org installer for this series; Python 3.13.18 is a newer source-only security release. If you need the latest security fixes, use an updated Python 3.13 from a trusted package provider.
 
 ### macOS
 
-1. Install Python 3.10 or newer and Node.js LTS. Install FFmpeg, for example with Homebrew: `brew install ffmpeg`.
-2. Double-click **Start RoboListener.command**. If macOS asks, choose **Open**.
-3. On first start, the launcher installs the Python and JavaScript dependencies. This can take several minutes.
-4. Keep the Terminal window open. The launcher opens the app at <http://127.0.0.1:5173> when both services are ready.
-5. To stop the app, press **Control-C** in Terminal.
+1. Install [Python 3.13](https://www.python.org/downloads/release/python-31317/). Under **Files**, select the macOS installer. Open the downloaded file and follow the installer steps.
+2. Install [Node.js LTS](https://nodejs.org/en/download/). Select the macOS installer, open it, and follow its steps.
+3. Install [Homebrew](https://brew.sh/) if you do not already have it. Open the Homebrew page, copy its install command, and paste it into Terminal. Press **Return**. Follow the instructions in Terminal, including any steps to add Homebrew to your PATH. Your Mac may ask for your password; the password does not appear as you type.
+4. Close and reopen Terminal. Enter the following command and press **Return** to install FFmpeg:
 
-You can also open Terminal in the project folder and run `./run.sh`.
+   ```sh
+   brew install ffmpeg
+   ```
 
-### Windows
+5. Check the tools. Enter each command in Terminal:
 
-1. Install Python 3.10 or newer. In the Python installer, enable **Add Python to PATH**. Install Node.js LTS and FFmpeg. Make sure `ffmpeg.exe` is on `PATH`.
-2. Double-click **Start RoboListener.bat**. The launcher runs PowerShell setup on first start.
-3. Keep the command window open. The launcher opens the app at <http://127.0.0.1:5173> when both services are ready.
-4. To stop the app, press **Ctrl+C** in the command window.
+   ```sh
+   python3 --version
+   node --version
+   npm --version
+   ffmpeg -version
+   ```
+
+   Each command should show a version. If a command is not found, close and reopen Terminal and try again. Check that `python3` reports a supported version between 3.10 and 3.13.
+6. Open the extracted RoboListener folder. Double-click **Start RoboListener.command**. If macOS asks whether to open it, choose **Open**. Leave the Terminal window open.
+7. The first start installs the app's dependencies and then opens your browser. If the browser does not open, go to <http://127.0.0.1:5173>.
+8. To stop RoboListener, select the Terminal window and press **Control-C**.
+
+If the launcher cannot run because of file permissions, open Terminal in the RoboListener folder, enter `chmod +x "Start RoboListener.command" run.sh setup.sh`, and try again. You can also run `./run.sh` in that folder.
+
+### Windows 10 or 11
+
+1. Install [Python 3.13](https://www.python.org/downloads/release/python-31317/). Under **Files**, select **Windows installer (64-bit)** for most computers. Open the installer. Select **Add Python to PATH** before you select **Install Now**. Complete the installation.
+2. Install [Node.js LTS](https://nodejs.org/en/download/). Choose the Windows installer and follow its steps.
+3. Open **Command Prompt**: open the Start menu, type `Command Prompt`, and select it. Enter this command to install FFmpeg with Windows Package Manager:
+
+   ```bat
+   winget install --id Gyan.FFmpeg --exact
+   ```
+
+   Follow any prompts. If `winget` is not found, install or update [App Installer](https://learn.microsoft.com/en-us/windows/package-manager/winget/), then open a new Command Prompt and try again.
+4. Close and reopen Command Prompt so it can find the new tools. Enter each command:
+
+   ```bat
+   python --version
+   node --version
+   npm --version
+   ffmpeg -version
+   ```
+
+   Each command should show a version. Check that `python` reports a supported version between 3.10 and 3.13. If a command is not found, restart Windows and check again. For Python, check that **Add Python to PATH** was selected during installation.
+5. Open the extracted RoboListener folder. Double-click **Start RoboListener.bat**. Leave the command window open.
+6. The first start installs the app's dependencies and then opens your browser. If the browser does not open, go to <http://127.0.0.1:5173>.
+7. To stop RoboListener, select the command window and press **Ctrl+C**.
 
 ### Linux
 
-1. Install Python 3.10 or newer, Node.js LTS with npm, and FFmpeg with your distribution's package manager. For Debian or Ubuntu, use `sudo apt install ffmpeg`.
-2. Open a terminal in the project folder and run `./run.sh`. If needed, first run `chmod +x run.sh setup.sh`.
-3. On first start, the launcher installs the Python and JavaScript dependencies. This can take several minutes.
-4. Keep the terminal open. The launcher opens the app at <http://127.0.0.1:5173> when both services are ready. If it does not open a browser, open that address yourself.
-5. To stop the app, press **Ctrl+C** in the terminal.
+1. Install Python 3.10 to 3.13, its `venv` support, Node.js LTS with npm, and FFmpeg. On Ubuntu or Debian, open a terminal and enter:
+
+   ```sh
+   sudo apt update
+   sudo apt install python3 python3-venv python3-pip ffmpeg
+   ```
+
+   Install [Node.js LTS](https://nodejs.org/en/download/) using the instructions for your distribution. Other Linux distributions use different package managers.
+2. In the terminal, check the tools:
+
+   ```sh
+   python3 --version
+   node --version
+   npm --version
+   ffmpeg -version
+   ```
+
+   Each command should show a version. Check that `python3` reports a version between 3.10 and 3.13.
+3. Open a terminal in the extracted RoboListener folder. If your file manager has **Open in Terminal**, use that option. Otherwise, type `cd `, drag the folder into the terminal, and press **Enter**.
+4. Enter the following command:
+
+   ```sh
+   chmod +x run.sh setup.sh
+   ./run.sh
+   ```
+
+5. The first start installs the app's dependencies. Keep the terminal open. If a browser does not open, go to <http://127.0.0.1:5173>.
+6. To stop RoboListener, select the terminal and press **Ctrl+C**.
+
+### Optional: install yt-dlp
+
+Install `yt-dlp` only if you want to monitor a supported YouTube, Twitch, or similar platform URL. Direct radio streams do not require it. See the [yt-dlp installation guide](https://github.com/yt-dlp/yt-dlp#installation). After installation, restart RoboListener. In **Pipeline**, check that yt-dlp shows **Installed**.
+
 
 ### Ports
 
