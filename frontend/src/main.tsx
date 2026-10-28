@@ -22,7 +22,8 @@ type Toast = { id: string; message: string; cls?: string };
 const savedRaw = localStorage.getItem("radiowatch-session");
 const saved = JSON.parse(savedRaw || "{}");
 const isFirstBrowserSession = !sessionStorage.getItem("rw-started");
-const initialShowResume = !!savedRaw && isFirstBrowserSession;
+const initialShowResume = !!savedRaw && isFirstBrowserSession &&
+  ((saved.selectedIds?.length ?? 0) > 0 || (saved.keywords?.keywords?.length ?? 0) > 0);
 
 // ── App ───────────────────────────────────────────────────────────────────────
 function App() {
@@ -213,7 +214,9 @@ function App() {
 
   async function refreshStaleStations() {
     try {
-      const refreshed = await Promise.all(selectedStations.map((s) => api.stationById(s.id).catch(() => s)));
+      const refreshed = await Promise.all(selectedStations.map((s) =>
+        s.id.startsWith("custom-") ? Promise.resolve(s) : api.stationById(s.id).catch(() => s),
+      ));
       setStations((prev) => {
         const byId = new Map(prev.map((s) => [s.id, s]));
         refreshed.forEach((s) => byId.set(s.id, s));
@@ -233,7 +236,7 @@ function App() {
         <div className="brand"><Radio size={22} /> RadioWatch</div>
         <nav>
           {(["discovery", "monitor", "keywords", "pipeline", "alerts"] as View[]).map((v) => (
-            <button key={v} className={view === v ? "active" : ""} onClick={() => setView(v)}>{v}</button>
+            <button key={v} className={view === v ? "active" : ""} onClick={() => setView(v)}>{v.charAt(0).toUpperCase() + v.slice(1)}</button>
           ))}
         </nav>
       </header>
@@ -243,7 +246,7 @@ function App() {
         <span className={`dot ${wsConnected ? "ok" : ""}`} />
         {wsConnected ? "Backend connected" : "Backend offline"}
         {activeCodes.map((c) => <b className="pill" key={c}>{c.toUpperCase()}</b>)}
-        <span>{selectedStations.length} monitored</span>
+        <span>{selectedStations.length} selected</span>
         <span>{keywords.keywords.length} keywords</span>
         <span>{alerts.filter((a) => !a.reviewed).length} unreviewed alerts</span>
         {diskWarn && <span className="disk-warn">⚠ Disk {status!.diskFreeMB} MB free</span>}
@@ -302,6 +305,7 @@ function App() {
           loadStations={loadStations} stations={stations} setStations={setStations}
           selectedIds={selectedIds} setSelectedIds={setSelectedIds}
           profiles={profiles} drawerStation={drawerStation} setDrawerStation={setDrawerStation}
+          ytDlpAvailable={status?.ytDlpAvailable ?? false}
         />
       )}
       {view === "monitor" && (
@@ -317,7 +321,9 @@ function App() {
       {view === "pipeline" && (
         <Pipeline pipeline={pipeline} setPipeline={setPipeline}
           selectedStations={selectedStations} keywords={keywords}
-          activeProfiles={activeProfiles} allProfiles={profiles} />
+          activeProfiles={activeProfiles} allProfiles={profiles}
+          ffmpegAvailable={status?.ffmpegAvailable ?? true}
+          ytDlpAvailable={status?.ytDlpAvailable ?? false} />
       )}
       {view === "alerts" && (
         <Alerts alerts={alerts} setAlerts={setAlerts} activeCodes={activeCodes}
@@ -355,6 +361,135 @@ function DeleteConfirmModal({ onConfirm, onCancel }: { onConfirm: () => void; on
   );
 }
 
+// ── Stream URL classifier ─────────────────────────────────────────────────────
+const PLATFORM_HOSTS = ["youtube.com", "youtu.be", "twitch.tv", "facebook.com", "instagram.com", "twitter.com", "x.com", "dailymotion.com", "vimeo.com", "tiktok.com", "kick.com"];
+
+function classifyUrl(url: string): { type: string; hint: string; needsYtDlp: boolean } {
+  const u = url.toLowerCase();
+  if (PLATFORM_HOSTS.some((h) => u.includes(h)))
+    return { type: "Platform", hint: "YouTube, Twitch, and similar platforms — yt-dlp resolves the real stream URL automatically.", needsYtDlp: true };
+  if (u.endsWith(".m3u8") || u.includes(".m3u8?"))
+    return { type: "HLS", hint: "HTTP Live Streaming — works directly with ffmpeg.", needsYtDlp: false };
+  if (u.startsWith("rtmp://") || u.startsWith("rtmps://"))
+    return { type: "RTMP", hint: "Real-Time Messaging Protocol — works directly with ffmpeg.", needsYtDlp: false };
+  if (u.endsWith(".mpd") || u.includes("manifest"))
+    return { type: "DASH", hint: "MPEG-DASH manifest — works directly with ffmpeg.", needsYtDlp: false };
+  if (u.startsWith("mms://") || u.startsWith("mmsh://"))
+    return { type: "MMS", hint: "Microsoft Media Server stream — works directly with ffmpeg.", needsYtDlp: false };
+  if (/\.(mp3|aac|ogg|opus|flac|wav)/.test(u))
+    return { type: "Direct audio", hint: "Direct audio file or Icecast/Shoutcast stream — works directly with ffmpeg.", needsYtDlp: false };
+  if (u.startsWith("http://") || u.startsWith("https://"))
+    return { type: "HTTP stream", hint: "Likely an Icecast/Shoutcast or proprietary stream — ffmpeg will try to auto-detect the format.", needsYtDlp: false };
+  return { type: "Unknown", hint: "Paste a full URL including the scheme (https://, rtmp://, etc.).", needsYtDlp: false };
+}
+
+// ── Custom Stream Form ────────────────────────────────────────────────────────
+function CustomStreamForm({ onAdd, ytDlpAvailable }: { onAdd: (station: Station) => void; ytDlpAvailable: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [url, setUrl] = useState("");
+  const [langCode, setLangCode] = useState("");
+  const [country, setCountry] = useState("");
+  const [isTV, setIsTV] = useState(false);
+  const [guideOpen, setGuideOpen] = useState(false);
+
+  const urlInfo = url.trim() ? classifyUrl(url.trim()) : null;
+
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!name.trim() || !url.trim() || !langCode.trim()) return;
+    const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    const station: Station = {
+      id: `custom-${crypto.randomUUID()}`,
+      name: name.trim(),
+      slug,
+      location: { cityName: "", countryName: country.trim() || "Custom", countryCode: "" },
+      genre: { text: isTV ? "TV (audio)" : "Custom Radio" },
+      popularity: { global: 0 },
+      streams: [{ url: url.trim(), bitrate: 0, format: urlInfo?.type.toLowerCase() ?? "custom", isHttps: url.trim().startsWith("https") }],
+      languageCode: langCode.trim().toLowerCase(),
+    };
+    onAdd(station);
+    setName(""); setUrl(""); setLangCode(""); setCountry(""); setIsTV(false); setOpen(false);
+  }
+
+  return (
+    <div style={{ marginTop: 12, borderTop: "1px solid #e2e8f0", paddingTop: 12 }}>
+      <button onClick={() => setOpen(!open)} style={{ fontSize: 13 }}>
+        {open ? "▾" : "▸"} Add custom stream URL
+      </button>
+      {open && (
+        <div style={{ marginTop: 10, maxWidth: 520 }}>
+          {/* Format guide */}
+          <div style={{ marginBottom: 12 }}>
+            <button onClick={() => setGuideOpen(!guideOpen)} style={{ fontSize: 12, color: "#526074", background: "none", border: "none", padding: 0, cursor: "pointer" }}>
+              {guideOpen ? "▾" : "▸"} Supported stream formats
+            </button>
+            {guideOpen && (
+              <table style={{ fontSize: 12, marginTop: 6, borderCollapse: "collapse", width: "100%" }}>
+                <tbody>
+                  {[
+                    ["HLS", "https://…/stream.m3u8", "ffmpeg", "TV, radio, most live streams"],
+                    ["Icecast / Shoutcast", "https://…:8000/stream", "ffmpeg", "Traditional internet radio"],
+                    ["RTMP / RTMPS", "rtmp://…/live/key", "ffmpeg", "Streaming servers"],
+                    ["MPEG-DASH", "https://…/manifest.mpd", "ffmpeg", "Adaptive streaming"],
+                    ["MMS", "mms://…", "ffmpeg", "Legacy Windows Media"],
+                    ["Direct audio", "https://…/audio.mp3", "ffmpeg", "MP3, AAC, OGG, Opus, FLAC"],
+                    ["YouTube / Twitch", "https://youtube.com/…", "yt-dlp + ffmpeg", "Requires yt-dlp"],
+                  ].map(([fmt, example, tool, notes]) => (
+                    <tr key={fmt} style={{ borderBottom: "1px solid #e2e8f0" }}>
+                      <td style={{ padding: "4px 8px 4px 0", fontWeight: 600, whiteSpace: "nowrap" }}>{fmt}</td>
+                      <td style={{ padding: "4px 8px", fontFamily: "monospace", fontSize: 11, color: "#526074" }}>{example}</td>
+                      <td style={{ padding: "4px 8px", whiteSpace: "nowrap" }}>{tool}</td>
+                      <td style={{ padding: "4px 0", color: "#627084" }}>{notes}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          <form onSubmit={submit} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <label>Stream URL
+              <input value={url} onChange={(e) => setUrl(e.target.value)}
+                placeholder="https://stream.example.com/live.m3u8" required />
+            </label>
+
+            {/* Live URL hint */}
+            {urlInfo && (
+              <div style={{ fontSize: 12, padding: "6px 10px", borderRadius: 6, background: urlInfo.needsYtDlp && !ytDlpAvailable ? "#fff3cd" : "#f0f4f8", color: "#526074" }}>
+                <b>{urlInfo.type}</b> — {urlInfo.hint}
+                {urlInfo.needsYtDlp && (
+                  ytDlpAvailable
+                    ? <span style={{ marginLeft: 6, color: "#2d9b6c" }}>✓ yt-dlp detected</span>
+                    : <span style={{ marginLeft: 6, color: "#c0392b" }}>⚠ yt-dlp not found — install with <code>pip install yt-dlp</code> or <code>brew install yt-dlp</code></span>
+                )}
+              </div>
+            )}
+
+            <label>Name<input value={name} onChange={(e) => setName(e.target.value)} placeholder="My Radio / Canal 24h" required /></label>
+            <div style={{ display: "flex", gap: 12 }}>
+              <label style={{ flex: 1 }}>Language code
+                <input value={langCode} onChange={(e) => setLangCode(e.target.value)} placeholder="es, en, pt…" required />
+              </label>
+              <label style={{ flex: 1 }}>Country (optional)
+                <input value={country} onChange={(e) => setCountry(e.target.value)} placeholder="Spain" />
+              </label>
+            </div>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+              <input type="checkbox" checked={isTV} onChange={(e) => setIsTV(e.target.checked)} style={{ width: "auto", flexShrink: 0 }} />
+              TV stream — video is ignored, only audio is transcribed
+            </label>
+            <button type="submit" className="primary" disabled={!name.trim() || !url.trim() || !langCode.trim()} style={{ alignSelf: "flex-start" }}>
+              Add stream
+            </button>
+          </form>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Discovery ─────────────────────────────────────────────────────────────────
 function Discovery(props: {
   languages: Language[]; activeCodes: string[]; toggleLanguage: (code: string) => void;
@@ -362,6 +497,7 @@ function Discovery(props: {
   loadStations: () => void; stations: Station[]; setStations: (fn: (prev: Station[]) => Station[]) => void;
   selectedIds: string[]; setSelectedIds: (v: string[]) => void;
   profiles: LanguageProfile[]; drawerStation: Station | null; setDrawerStation: (s: Station | null) => void;
+  ytDlpAvailable: boolean;
 }) {
   const [langSearch, setLangSearch] = useState("");
   const [stationQuery, setStationQuery] = useState("");
@@ -373,6 +509,14 @@ function Discovery(props: {
   const [countryHasMore, setCountryHasMore] = useState<Record<string, boolean>>({});
 
   const LOAD_MORE_LIMIT = 40;
+
+  function addCustomStation(station: Station) {
+    props.setStations((prev) => {
+      if (prev.some((s) => s.id === station.id)) return prev;
+      return [...prev, station];
+    });
+    props.setSelectedIds([...props.selectedIds, station.id]);
+  }
 
   const visibleLangs = props.languages.filter((l) => {
     const q = langSearch.toLowerCase();
@@ -395,7 +539,11 @@ function Discovery(props: {
     : preCountryFiltered.filter((s) => s.location.countryName === countryFilter);
 
   const countries = groupBy(filtered, (s) => s.location.countryName);
-  const genres = Array.from(new Set(props.stations.map((s) => s.genre.text))).filter(Boolean).sort();
+  const FREQUENCY_RE = /^[\d.]+\s*(FM|AM|MHz|kHz|kbps)?$/i;
+  const genres = Array.from(new Set(props.stations.map((s) => s.genre.text)))
+    .filter(Boolean)
+    .filter((g) => !FREQUENCY_RE.test(g))
+    .sort();
 
   async function loadMore(countryName: string) {
     const offset = (countryOffsets[countryName] || 0) + LOAD_MORE_LIMIT;
@@ -424,42 +572,44 @@ function Discovery(props: {
         {/* Language panel */}
         {props.languagePanelOpen ? (
           <>
-            <input
-              placeholder="Search languages…"
-              value={langSearch}
-              onChange={(e) => setLangSearch(e.target.value)}
-              style={{ marginBottom: 10 }}
-            />
-            <div className="language-grid">
-              {visibleLangs.map((lang) => {
-                const profile = props.profiles.find((p) => p.code === lang.code);
-                const selected = props.activeCodes.includes(lang.code);
-                return (
-                  <button
-                    key={lang.code}
-                    className={`language ${selected ? "selected" : ""}`}
-                    onClick={() => props.toggleLanguage(lang.code)}
-                  >
-                    <strong>{lang.nameEnglish}</strong>
-                    <span>{lang.nameNative} · {lang.code.toUpperCase()}</span>
-                    <small>
-                      {lang.stationCount.toLocaleString()} stations ·{" "}
-                      {profile ? "✓ Whisper" : "⟳ Auto-detect"} ·{" "}
-                      {profile?.lemmaSupported ? "Full lemma" : "Exact/fuzzy only"}
-                    </small>
-                  </button>
-                );
-              })}
-              {visibleLangs.length === 0 && <p style={{ color: "#9aa7b5" }}>No languages match "{langSearch}"</p>}
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
+              <input
+                placeholder="Search languages…"
+                value={langSearch}
+                onChange={(e) => setLangSearch(e.target.value)}
+                style={{ flex: 1, margin: 0 }}
+              />
+              <button className="primary" disabled={!props.activeCodes.length} onClick={props.loadStations} style={{ flexShrink: 0 }}>
+                Load stations
+              </button>
+            </div>
+            <div className="language-grid-wrapper">
+              <div className="language-grid">
+                {visibleLangs.map((lang) => {
+                  const profile = props.profiles.find((p) => p.code === lang.code);
+                  const selected = props.activeCodes.includes(lang.code);
+                  return (
+                    <button
+                      key={lang.code}
+                      className={`language ${selected ? "selected" : ""}`}
+                      onClick={() => props.toggleLanguage(lang.code)}
+                    >
+                      <strong>{lang.nameEnglish}</strong>
+                      <span>{lang.nameNative} · {lang.code.toUpperCase()}</span>
+                      <small>
+                        {lang.stationCount.toLocaleString()} stations ·{" "}
+                        {profile ? "✓ Whisper" : "⟳ Auto-detect"} ·{" "}
+                        {profile?.lemmaSupported ? "Full lemma" : "Exact/fuzzy only"}
+                      </small>
+                    </button>
+                  );
+                })}
+                {visibleLangs.length === 0 && <p style={{ color: "#9aa7b5" }}>No languages match "{langSearch}"</p>}
+              </div>
             </div>
             {props.activeCodes.length > 5 && (
               <p className="warning">Fetching more than 5 languages at once may be slow.</p>
             )}
-            <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-              <button className="primary" disabled={!props.activeCodes.length} onClick={props.loadStations}>
-                Load stations
-              </button>
-            </div>
           </>
         ) : (
           <div className="lang-collapse">
@@ -467,29 +617,40 @@ function Discovery(props: {
             <button onClick={() => props.setLanguagePanelOpen(true)}>Edit languages</button>
           </div>
         )}
+        <CustomStreamForm onAdd={addCustomStation} ytDlpAvailable={props.ytDlpAvailable} />
       </section>
 
       {/* Search + filters */}
       {props.stations.length > 0 && (
         <>
-          <section className="tools">
-            <Search size={18} />
-            <input placeholder="Search station or city" value={stationQuery} onChange={(e) => setStationQuery(e.target.value)} style={{ flex: 1, minWidth: 160 }} />
-            <ChipRow values={["all", ...props.activeCodes]} current={langFilter} onChange={(v) => { setLangFilter(v); setCountryFilter("all"); }} />
-            {genres.length > 0 && <ChipRow values={["all", ...genres.slice(0, 12)]} current={genre} onChange={(v) => { setGenre(v); setCountryFilter("all"); }} />}
-            {availableCountries.length > 0 && (
-              <div className="country-select-wrap">
-                <select
-                  value={countryFilter}
-                  onChange={(e) => setCountryFilter(e.target.value)}
-                  style={{ width: "auto", minWidth: 160 }}
-                >
-                  <option value="all">All countries ({availableCountries.length})</option>
-                  {availableCountries.map((c) => {
-                    const count = preCountryFiltered.filter((s) => s.location.countryName === c).length;
-                    return <option key={c} value={c}>{c} ({count})</option>;
-                  })}
-                </select>
+          <section className="tools" style={{ flexDirection: "column", alignItems: "stretch", gap: 10 }}>
+            <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <Search size={18} />
+              <input placeholder="Search station or city" value={stationQuery} onChange={(e) => setStationQuery(e.target.value)} style={{ flex: 1, minWidth: 160 }} />
+              <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                <span className="filter-label">Language</span>
+                <ChipRow values={["all", ...props.activeCodes]} current={langFilter} onChange={(v) => { setLangFilter(v); setCountryFilter("all"); }} />
+              </div>
+            </div>
+            {(genres.length > 0 || availableCountries.length > 0) && (
+              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                {genres.length > 0 && (
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                    <span className="filter-label">Genre</span>
+                    <ChipRow values={["all", ...genres.slice(0, 15)]} current={genre} onChange={(v) => { setGenre(v); setCountryFilter("all"); }} />
+                  </div>
+                )}
+                {availableCountries.length > 0 && (
+                  <div className="country-select-wrap">
+                    <select value={countryFilter} onChange={(e) => setCountryFilter(e.target.value)} style={{ width: "auto", minWidth: 160 }}>
+                      <option value="all">All countries ({availableCountries.length})</option>
+                      {availableCountries.map((c) => {
+                        const count = preCountryFiltered.filter((s) => s.location.countryName === c).length;
+                        return <option key={c} value={c}>{c} ({count})</option>;
+                      })}
+                    </select>
+                  </div>
+                )}
               </div>
             )}
           </section>
@@ -572,16 +733,19 @@ function StationCard({ station: s, selected, toggle, onDetail }: {
   station: Station; selected: boolean; toggle: () => void; onDetail: () => void;
 }) {
   const disabled = s.streams.length === 0;
+  const isCustom = s.id.startsWith("custom-");
   return (
     <article className={`card station ${selected ? "selected" : ""} ${disabled ? "disabled" : ""}`}
       onClick={() => !disabled && toggle()}>
       <div>
         <b>{s.name}</b>
         <span className="pill">{s.languageCode ? s.languageCode.toUpperCase() : "?"}</span>
+        {isCustom && <span className="badge info" style={{ marginLeft: 4 }}>Custom</span>}
       </div>
-      <p>{s.location.cityName || "Unknown city"} · {s.genre.text}</p>
+      <p>{s.location.cityName || s.location.countryName || "Custom"} · {s.genre.text}</p>
       <small>
         {disabled ? "No stream available"
+          : isCustom ? s.streams[0].url.slice(0, 50) + (s.streams[0].url.length > 50 ? "…" : "")
           : `${s.streams[0].format.toUpperCase()} · ${s.streams[0].bitrate || "?"} kbps`}
         {!s.languageCode && <span className="badge warn" style={{ marginLeft: 6 }}>Language unverified</span>}
       </small>
@@ -610,9 +774,12 @@ function StationDrawer({ station: s, selected, toggle, onClose }: {
           <tr><td>Genre</td><td>{s.genre.text}</td></tr>
           <tr><td>Language</td><td>{s.languageCode ? s.languageCode.toUpperCase() : "Unverified"}</td></tr>
           <tr><td>Votes</td><td>{s.popularity.global > 0 ? s.popularity.global.toLocaleString() : "—"}</td></tr>
-          <tr><td>UUID</td><td style={{ fontSize: 11, wordBreak: "break-all" }}>{s.id}</td></tr>
         </tbody>
       </table>
+      <details>
+        <summary style={{ cursor: "pointer", fontSize: 12, color: "#aeaeb2", userSelect: "none", marginTop: 4 }}>Technical details</summary>
+        <p style={{ fontSize: 11, color: "#aeaeb2", wordBreak: "break-all", margin: "6px 0 0", fontFamily: "monospace" }}>UUID: {s.id}</p>
+      </details>
       <h2 style={{ fontSize: 15 }}>Streams ({s.streams.length})</h2>
       {s.streams.length === 0 && <p style={{ color: "#9aa7b5" }}>No stream URLs available.</p>}
       {s.streams.map((st, i) => (
@@ -647,6 +814,7 @@ function Monitor({ selectedStations, status, wsConnected, startMonitoring, setSe
   const [listeningId, setListeningId] = useState<string | null>(null);
   const statusById = new Map((status?.stationStatuses || []).map((s) => [s.stationId, s]));
   const runningIds = new Set((status?.stationStatuses || []).map((s) => s.stationId));
+  const allRunning = selectedStations.length > 0 && selectedStations.every((s) => runningIds.has(s.id));
   const visible = selectedStations.filter((s) => langFilter === "all" || s.languageCode === langFilter);
 
   return (
@@ -669,8 +837,8 @@ function Monitor({ selectedStations, status, wsConnected, startMonitoring, setSe
           {status && <span>{status.diskFreeMB.toLocaleString()} MB free</span>}
         </div>
         <div className="actions">
-          <button className="primary" disabled={!selectedStations.length} onClick={() => startMonitoring()}>
-            <Play size={17} /> Start monitoring
+          <button className="primary" disabled={!selectedStations.length || allRunning} onClick={() => startMonitoring()}>
+            <Play size={17} /> {allRunning ? "Monitoring active" : "Start monitoring"}
           </button>
           <button onClick={() => api.stopAll().catch(() => {})}><Square size={17} /> Stop all</button>
         </div>
@@ -753,7 +921,7 @@ function Monitor({ selectedStations, status, wsConnected, startMonitoring, setSe
                     {isListening ? "Mute" : "Listen"}
                   </button>
                 )}
-                <button style={{ fontSize: 13 }} onClick={() => {
+                <button className="remove-btn" style={{ fontSize: 13 }} onClick={() => {
                   api.stopStation(station.id).catch(() => {});
                   if (isListening) setListeningId(null);
                   setSelectedIds(selectedStations.filter((s) => s.id !== station.id).map((s) => s.id));
@@ -773,8 +941,28 @@ function Keywords({ keywords, setKeywords, addKeywords, activeCodes, profiles }:
   addKeywords: (values: string[]) => void; activeCodes: string[]; profiles: LanguageProfile[];
 }) {
   const [entry, setEntry] = useState("");
+  const [presetName, setPresetName] = useState("");
+  const [savedPresets, setSavedPresets] = useState<Record<string, string[]>>(() => {
+    try { return JSON.parse(localStorage.getItem("radiowatch-presets") || "{}"); }
+    catch { return {}; }
+  });
+
   function commit() { addKeywords(entry.split("\n")); setEntry(""); }
   const update = (next: KeywordConfig) => { setKeywords(next); api.patchKeywords(next).catch(() => {}); };
+
+  function savePreset() {
+    if (!presetName.trim() || !keywords.keywords.length) return;
+    const next = { ...savedPresets, [presetName.trim()]: keywords.keywords.map((k) => k.text) };
+    setSavedPresets(next);
+    localStorage.setItem("radiowatch-presets", JSON.stringify(next));
+    setPresetName("");
+  }
+
+  function deletePreset(name: string) {
+    const { [name]: _, ...next } = savedPresets;
+    setSavedPresets(next);
+    localStorage.setItem("radiowatch-presets", JSON.stringify(next));
+  }
 
   return (
     <main>
@@ -803,27 +991,49 @@ function Keywords({ keywords, setKeywords, addKeywords, activeCodes, profiles }:
             onChange={(e) => update({ ...keywords, fuzzyThreshold: Number(e.target.value) })} /> {keywords.fuzzyThreshold}</label>
         )}
         {keywords.matchMode === "lemma" && <Coverage profiles={profiles.filter((p) => activeCodes.includes(p.code))} showInstall />}
+
+        <div className="save-preset-row">
+          <input
+            value={presetName}
+            onChange={(e) => setPresetName(e.target.value)}
+            placeholder="Preset name…"
+            onKeyDown={(e) => { if (e.key === "Enter") savePreset(); }}
+            style={{ maxWidth: 240 }}
+          />
+          <button disabled={!presetName.trim() || !keywords.keywords.length} onClick={savePreset}>
+            Save as preset
+          </button>
+        </div>
       </section>
-      <section className="preset-grid">
-        {activeCodes.flatMap((code) =>
-          Object.entries(presets[code] || {}).map(([name, values]) => (
-            <article className="card" key={`${code}-${name}`}>
-              <b>{code.toUpperCase()} · {name}</b>
-              <p>{values.join(", ")}</p>
-              <button onClick={() => addKeywords(values)}>Add all</button>
+
+      {Object.keys(savedPresets).length > 0 ? (
+        <section className="preset-grid">
+          {Object.entries(savedPresets).map(([name, values]) => (
+            <article className="card" key={name}>
+              <b>{name}</b>
+              <p style={{ color: "#627084", fontSize: 13 }}>{values.join(", ")}</p>
+              <div className="actions">
+                <button onClick={() => addKeywords(values)}>Load</button>
+                <button className="remove-btn" onClick={() => deletePreset(name)}>Delete</button>
+              </div>
             </article>
-          )),
-        )}
-      </section>
+          ))}
+        </section>
+      ) : (
+        <p style={{ textAlign: "center", color: "#9aa7b5", padding: "28px 0", fontSize: 14 }}>
+          No saved presets yet — add keywords above and click "Save as preset".
+        </p>
+      )}
     </main>
   );
 }
 
 // ── Pipeline ──────────────────────────────────────────────────────────────────
-function Pipeline({ pipeline, setPipeline, selectedStations, keywords, activeProfiles, allProfiles }: {
+function Pipeline({ pipeline, setPipeline, selectedStations, keywords, activeProfiles, allProfiles, ffmpegAvailable, ytDlpAvailable }: {
   pipeline: PipelineConfig; setPipeline: (v: PipelineConfig) => void;
   selectedStations: Station[]; keywords: KeywordConfig;
   activeProfiles: LanguageProfile[]; allProfiles: LanguageProfile[];
+  ffmpegAvailable: boolean; ytDlpAvailable: boolean;
 }) {
   const script = useMemo(() => generateScript(pipeline, selectedStations, keywords, activeProfiles),
     [pipeline, selectedStations, keywords, activeProfiles]);
@@ -856,6 +1066,41 @@ function Pipeline({ pipeline, setPipeline, selectedStations, keywords, activePro
         </Panel>
         <Panel title="Language models">
           <Coverage profiles={allProfiles} activeCodes={new Set(activeProfiles.map((p) => p.code))} showInstall />
+        </Panel>
+        <Panel title="Dependencies">
+          <table style={{ fontSize: 13, borderCollapse: "collapse", width: "100%" }}>
+            <tbody>
+              <tr>
+                <td style={{ padding: "4px 0", fontWeight: 600 }}>ffmpeg</td>
+                <td style={{ padding: "4px 8px" }}>
+                  {ffmpegAvailable
+                    ? <span className="badge ok">Installed</span>
+                    : <span className="badge warn">Not found</span>}
+                </td>
+                <td style={{ padding: "4px 0", fontSize: 12, color: "#627084" }}>
+                  {ffmpegAvailable ? "All stream capture works." : "Required for all stream capture. Install via brew install ffmpeg or your package manager."}
+                </td>
+              </tr>
+              <tr>
+                <td style={{ padding: "4px 0", fontWeight: 600 }}>yt-dlp</td>
+                <td style={{ padding: "4px 8px" }}>
+                  {ytDlpAvailable
+                    ? <span className="badge ok">Installed</span>
+                    : <span className="badge warn">Not found</span>}
+                </td>
+                <td style={{ padding: "4px 0", fontSize: 12, color: "#627084" }}>
+                  {ytDlpAvailable
+                    ? "YouTube, Twitch, and similar platform streams are supported."
+                    : "Optional. Enables YouTube, Twitch, and other platform streams. Install with: pip install yt-dlp"}
+                </td>
+              </tr>
+              <tr>
+                <td style={{ padding: "4px 0", fontWeight: 600 }}>spaCy</td>
+                <td style={{ padding: "4px 8px" }}><span className="badge ok">Installed</span></td>
+                <td style={{ padding: "4px 0", fontSize: 12, color: "#627084" }}>Lemma matching. Install language models in the Language models panel above.</td>
+              </tr>
+            </tbody>
+          </table>
         </Panel>
       </section>
       <details className="run-instructions band">

@@ -55,41 +55,5 @@ export const defaultPipeline: PipelineConfig = {
   transcriptLogDirectory: "./transcripts",
 };
 
-export const presets: Record<string, Record<string, string[]>> = {
-  es: {
-    "Derechos humanos": ["detención", "desaparición", "tortura", "ejecución", "desplazamiento"],
-    Seguridad: ["operativo", "enfrentamiento", "homicidio", "secuestro", "narcotráfico"],
-    "Protesta social": ["manifestación", "protesta", "marcha", "huelga", "represión"],
-    Migración: ["migrantes", "deportación", "frontera", "caravana", "expulsión"],
-    Corrupción: ["corrupción", "soborno", "desvío", "impunidad", "fiscal"],
-  },
-  fr: {
-    "Droits humains": ["détention", "disparition", "torture", "exécution", "déplacement"],
-    Sécurité: ["opération", "affrontement", "homicide", "enlèvement", "trafic"],
-    Protestation: ["manifestation", "grève", "répression", "blocus"],
-    Migration: ["migrants", "expulsion", "frontière", "asile", "réfugiés"],
-    Corruption: ["corruption", "détournement", "impunité", "procureur"],
-  },
-  ar: {
-    "Human rights": ["اعتقال", "اختفاء", "تعذيب", "إعدام", "تهجير"],
-    Security: ["مداهمة", "مواجهة", "جريمة", "اختطاف", "مخدرات"],
-    Protest: ["احتجاج", "مظاهرة", "إضراب", "قمع"],
-    Migration: ["مهاجرون", "ترحيل", "لجوء", "حدود"],
-    Corruption: ["فساد", "رشوة", "اختلاس", "إفلات من العقاب"],
-  },
-  pt: {
-    "Direitos humanos": ["detenção", "desaparecimento", "tortura", "execução", "deslocamento"],
-    Segurança: ["operação", "confronto", "homicídio", "sequestro", "narcotráfico"],
-    Protesto: ["manifestação", "greve", "repressão", "bloqueio"],
-    Migração: ["migrantes", "deportação", "fronteira", "asilo", "refugiados"],
-    Corrupção: ["corrupção", "suborno", "desvio", "impunidade", "promotor"],
-  },
-  en: {
-    "Human rights": ["detention", "disappearance", "torture", "execution", "displacement"],
-    Security: ["operation", "clash", "homicide", "kidnapping", "trafficking"],
-    Protest: ["protest", "march", "strike", "repression"],
-    Migration: ["migrants", "deportation", "border", "asylum", "refugees"],
-    Corruption: ["corruption", "bribery", "impunity", "prosecutor"],
-  },
-};
+export const presets: Record<string, Record<string, string[]>> = {};
 

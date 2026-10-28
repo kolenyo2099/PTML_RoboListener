@@ -79,6 +79,8 @@ export type BackendStatus = {
   diskFreeMB: number;
   loadedSpaCyModels: string[];
   unreviewedAlerts: number;
+  ffmpegAvailable: boolean;
+  ytDlpAvailable: boolean;
   stationStatuses: {
     stationId: string;  // Radio Browser UUID
     languageCode: string;

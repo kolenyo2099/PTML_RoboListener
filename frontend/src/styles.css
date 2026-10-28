@@ -266,6 +266,8 @@ nav button.active {
 .tools, .key-row, .actions, .summary {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
 }
+.summary { margin-bottom: 10px; }
+.actions { margin-bottom: 10px; }
 .summary span {
   background: var(--surface-2);
   border: 1px solid var(--border);
@@ -283,6 +285,48 @@ nav button.active {
 .language-grid  { grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); }
 .station-grid   { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); margin-top: 12px; }
 .monitor-grid, .preset-grid, .settings-grid { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+
+/* ── Language grid wrapper (scrollable) ───────────────────────────────────── */
+.language-grid-wrapper {
+  max-height: 380px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+  background: var(--surface-2);
+  margin-bottom: 10px;
+}
+
+/* ── Filter label ─────────────────────────────────────────────────────────── */
+.filter-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+/* ── Remove / destructive button ──────────────────────────────────────────── */
+.remove-btn {
+  color: #c0392b;
+  border-color: rgba(192,57,43,.25);
+}
+.remove-btn:hover:not(:disabled) {
+  background: #fff0ee;
+  border-color: rgba(192,57,43,.5);
+  color: #c0392b;
+}
+
+/* ── Save preset row ──────────────────────────────────────────────────────── */
+.save-preset-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
 
 /* ── Language cards ───────────────────────────────────────────────────────── */
 .language {
@@ -546,7 +590,7 @@ details[open] > summary::before { transform: rotate(90deg); }
 /* ── Language model coverage table ───────────────────────────────────────── */
 .coverage-table { table-layout: fixed; width: 100%; }
 .coverage-lang { width: 36px; font-weight: 600; }
-.coverage-model { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 0; }
+.coverage-model { font-family: "SF Mono", "JetBrains Mono", monospace; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; width: 160px; }
 .coverage-table td { padding: 4px 6px 4px 0; vertical-align: middle; }
 .coverage-inactive { opacity: 0.4; }
 
@@ -562,8 +606,8 @@ details[open] > summary::before { transform: rotate(90deg); }
   transition: background var(--transition), border-color var(--transition);
 }
 .install-btn:hover:not(:disabled) {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--sky);
+  border-color: var(--sky);
   color: #fff;
 }
 .install-btn:disabled { opacity: 0.6; cursor: default; }

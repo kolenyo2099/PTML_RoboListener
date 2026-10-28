@@ -112,6 +112,8 @@ class MonitorService:
             "loadedSpaCyModels": self.matcher.loaded_models(),
             "stationStatuses": [self._slot_status(slot) for slot in self.slots.values()],
             "unreviewedAlerts": len([alert for alert in alerts if not alert["reviewed"]]),
+            "ffmpegAvailable": shutil.which("ffmpeg") is not None,
+            "ytDlpAvailable": shutil.which("yt-dlp") is not None,
         }
 
     async def subscribe(self) -> asyncio.Queue:
@@ -166,27 +168,56 @@ class MonitorService:
             slot.error_message = slot.error_message or "All stream fallbacks failed."
             await self._broadcast(self.snapshot())
 
+    # Platform URLs that ffmpeg cannot open directly — yt-dlp extracts the real
+    # stream URL first. Time-limited URLs (e.g. YouTube) are valid for several
+    # hours, which is long enough for a monitoring session.
+    _PLATFORM_HOSTS = (
+        "youtube.com", "youtu.be", "twitch.tv", "facebook.com",
+        "instagram.com", "twitter.com", "x.com", "dailymotion.com",
+        "vimeo.com", "tiktok.com", "kick.com",
+    )
+
+    def _resolve_url(self, url: str) -> str:
+        """Return the direct stream URL. Uses yt-dlp for platform URLs."""
+        url_lower = url.lower()
+        is_platform = any(host in url_lower for host in self._PLATFORM_HOSTS)
+        if not is_platform:
+            return url
+        if shutil.which("yt-dlp") is None:
+            return url
+        try:
+            result = subprocess.run(
+                ["yt-dlp", "-g", "--format", "bestaudio/best", "--no-playlist", url],
+                capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode == 0:
+                resolved = result.stdout.strip().split("\n")[0]
+                if resolved:
+                    return resolved
+        except Exception:
+            pass
+        return url
+
     def _start_ffmpeg(self, slot: MonitorSlot, url: str, stream_index: int) -> None:
+        resolved = self._resolve_url(url)
         pattern = slot.work_dir / f"stream{stream_index}_%06d.wav"
-        command = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-i",
-            url,
-            "-vn",
-            "-ac",
-            "1",
-            "-ar",
-            "16000",
-            "-f",
-            "segment",
-            "-segment_time",
-            str(self.pipeline.chunkSeconds),
-            "-reset_timestamps",
-            "1",
+        is_http = resolved.lower().startswith(("http://", "https://"))
+        command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+        if is_http:
+            # Reconnect on dropped HTTP streams; user-agent avoids blocks from
+            # servers that reject the default ffmpeg agent string.
+            command += [
+                "-reconnect", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "5",
+                "-user_agent", "Mozilla/5.0 (compatible; RadioWatch/1.0)",
+            ]
+        command += [
+            "-i", resolved,
+            "-vn", "-ac", "1", "-ar", "16000",
+            "-f", "segment",
+            "-segment_time", str(self.pipeline.chunkSeconds),
+            "-reset_timestamps", "1",
             str(pattern),
         ]
         # stderr=DEVNULL prevents the pipe buffer from filling up and blocking
@@ -200,11 +231,32 @@ class MonitorService:
             if chunk in processed or not chunk.exists():
                 continue
             processed.add(chunk)
+
+            # Evict the oldest chunk from disk when the ring buffer wraps so
+            # WAV files don't accumulate indefinitely (disk + O(n) glob leak).
+            evicted: Path | None = None
+            if len(slot.ring_buffer) == slot.ring_buffer.maxlen:
+                evicted = slot.ring_buffer[0]
             slot.ring_buffer.append(chunk)
+            if evicted is not None:
+                evicted.unlink(missing_ok=True)
+                processed.discard(evicted)
+
             slot.chunk_index += 1
             slot.status = "transcribing"
             await self._broadcast(self.snapshot())
-            transcript = await asyncio.to_thread(self._transcribe, chunk, slot.station.languageCode)
+            try:
+                transcript = await asyncio.to_thread(self._transcribe, chunk, slot.station.languageCode)
+            except Exception as exc:
+                # A transient transcription failure (OOM, corrupt WAV, model
+                # reload race) must not kill the monitoring task.  Log to the
+                # slot history and continue with the next chunk.
+                slot.chunk_history.append("error")
+                slot.status = "capturing"
+                slot.error_message = f"Transcription error on chunk {slot.chunk_index}: {exc}"
+                await self._broadcast(self.snapshot())
+                continue
+            slot.error_message = ""
             slot.last_transcript = transcript
             slot.last_transcript_at = datetime.now(timezone.utc)
             self.total_chunks += 1
